@@ -63,3 +63,4 @@ channel = "stable-25_05"
 
 [userenv.shared]
 TURSO_DATABASE_URL = "libsql://zam-dfghjkzq6.aws-eu-west-1.turso.io"
+NITTER_BASE = "http://mail.tidebridges.com:8091"

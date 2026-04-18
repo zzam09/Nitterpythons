@@ -1,10 +1,11 @@
+import os
 import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
 from db import get_connection, DB_PATH, get_db_info
 
-NITTER_BASE = "http://mail.tidebridges.com:8091"
+NITTER_BASE = os.environ.get("NITTER_BASE", "http://mail.tidebridges.com:8091")
 USERNAMES = ["nasa", "SpaceX", "elonmusk"]
 
 

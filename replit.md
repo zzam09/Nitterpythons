@@ -1,27 +1,41 @@
-# Workspace
+# Nitter Tweet Tracker
 
 ## Overview
 
-pnpm workspace monorepo using TypeScript. Each package manages its own dependencies.
+A simple standalone Python project for tracking tweets via a Nitter RSS feed. Stores data in a local SQLite database and provides a Flask-based web dashboard and API.
 
 ## Stack
 
-- **Monorepo tool**: pnpm workspaces
-- **Node.js version**: 24
-- **Package manager**: pnpm
-- **TypeScript version**: 5.9
-- **API framework**: Express 5
-- **Database**: PostgreSQL + Drizzle ORM
-- **Validation**: Zod (`zod/v4`), `drizzle-zod`
-- **API codegen**: Orval (from OpenAPI spec)
-- **Build**: esbuild (CJS bundle)
+- **Language**: Python 3.11
+- **Web framework**: Flask
+- **HTTP client**: requests
+- **Scheduling**: schedule
+- **Database**: SQLite (tweets.db)
 
-## Key Commands
+## Project Files
 
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- `pnpm --filter @workspace/api-server run dev` — run API server locally
+- `main.py` — fetches tweets from Nitter RSS feeds and saves them to tweets.db
+- `scheduler.py` — database-driven scheduler that automatically fetches tweets at configurable intervals
+- `dashboard.py` — Flask web app with dashboard UI and REST API
+- `migrate.py` — runs database schema migrations
+- `tweets.db` — SQLite database
+- `requirements.txt` — Python dependencies (requests, flask)
+- `API_DOCS.md` — full REST API documentation
 
-See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details.
+## Running
+
+- **Dashboard**: `python dashboard.py` (runs on port 5000)
+- **Fetch tweets once**: `python main.py`
+- **Run scheduler**: `python scheduler.py`
+- **Run migrations**: `python migrate.py`
+
+## API Endpoints
+
+- `GET /` — Dashboard UI
+- `GET /user/<username>` — Per-user tweet view
+- `GET /docs` — API documentation page
+- `GET /api/stats` — Summary stats
+- `GET /api/users` — List tracked users
+- `POST /api/users` — Add a new user
+- `GET /api/tweets` — All tweets (optional `?username=` filter)
+- `GET /api/tweets/<username>` — Tweets for a specific user

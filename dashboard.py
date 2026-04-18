@@ -29,9 +29,32 @@ BASE_STYLE = """
   .card .row:last-of-type { border-bottom: none; }
   .card .row .key { color: #888; }
   .card .row .val { font-weight: 600; }
-  .btn { display: inline-block; margin-top: 1rem; background: #63cab7; color: #0f0f13; padding: 0.45rem 1.1rem; border-radius: 6px; font-size: 0.85rem; font-weight: 700; }
+  .card .btn { margin-top: 1rem; display: block; text-align: center; }
+  .btn { display: inline-block; background: #63cab7; color: #0f0f13; padding: 0.45rem 1.1rem; border-radius: 6px; font-size: 0.85rem; font-weight: 700; cursor: pointer; border: none; }
   .btn:hover { background: #7dddd0; text-decoration: none; }
+  .btn-sm { padding: 0.3rem 0.8rem; font-size: 0.8rem; margin-top: 0; }
+  .btn-danger { background: #c0392b; color: #fff; }
+  .btn-danger:hover { background: #e74c3c; }
+  .nav-bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.25rem; }
+  .nav-links { display: flex; gap: 0.75rem; align-items: center; }
+  .nav-links a { font-size: 0.88rem; }
+  .nav-links .btn { margin-top: 0; }
   .back { display: inline-block; margin-bottom: 1.5rem; font-size: 0.88rem; color: #63cab7; }
+  /* Settings page */
+  .settings-grid { display: grid; grid-template-columns: 1fr; gap: 1rem; max-width: 680px; }
+  .setting-row { background: #17171f; border: 1px solid #2a2a3a; border-radius: 8px; padding: 1.1rem 1.3rem; }
+  .setting-row label { display: block; font-size: 0.8rem; color: #888; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem; }
+  .setting-row .setting-label { font-size: 0.95rem; font-weight: 600; color: #c9c9d4; margin-bottom: 0.2rem; }
+  .setting-row .hint { font-size: 0.78rem; color: #666; margin-bottom: 0.6rem; }
+  .setting-row input[type=text], .setting-row input[type=number] { width: 100%; background: #0f0f13; border: 1px solid #2a2a3a; border-radius: 5px; color: #c9c9d4; padding: 0.5rem 0.75rem; font-size: 0.9rem; outline: none; transition: border-color 0.15s; }
+  .setting-row input:focus { border-color: #63cab7; }
+  .source-badge { display: inline-block; font-size: 0.68rem; padding: 0.1rem 0.45rem; border-radius: 4px; font-weight: 700; margin-left: 0.4rem; vertical-align: middle; }
+  .source-file    { background: #1a2e1a; color: #63ca7a; }
+  .source-env     { background: #1a1a2e; color: #7a8bca; }
+  .source-default { background: #2a2a2a; color: #888; }
+  .toast { position: fixed; bottom: 1.5rem; right: 1.5rem; background: #17171f; border: 1px solid #2a2a3a; border-radius: 8px; padding: 0.75rem 1.2rem; font-size: 0.88rem; color: #63cab7; box-shadow: 0 4px 20px rgba(0,0,0,0.4); opacity: 0; transform: translateY(8px); transition: opacity 0.25s, transform 0.25s; pointer-events: none; z-index: 999; }
+  .toast.show { opacity: 1; transform: translateY(0); }
+  .toast.error { color: #e07070; border-color: #4a2020; }
   .count-label { font-size: 0.9rem; color: #888; margin-bottom: 1rem; }
   .empty { color: #888; font-style: italic; padding: 2rem 0; }
   table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
@@ -164,7 +187,13 @@ def home():
 <head><meta charset="UTF-8"><title>Tweet Tracker Dashboard</title>{BASE_STYLE}</head>
 <body>
 <div class="container">
-  <h1>Tweet Tracker</h1>
+  <div class="nav-bar">
+    <h1>Tweet Tracker</h1>
+    <div class="nav-links">
+      <a href="/docs">API Docs</a>
+      <a href="/settings" class="btn">Settings</a>
+    </div>
+  </div>
   <p class="sub">Live stats from tweets.db</p>
 
   <div class="top-bar">
@@ -587,6 +616,165 @@ def api_config():
         return cors(jsonify(config.summary()))
     except Exception as e:
         return cors(jsonify({"error": str(e)})), 500
+
+
+@app.route("/api/settings", methods=["GET"])
+def api_settings_get():
+    """Return all editable settings with current values and sources."""
+    try:
+        return cors(jsonify(config.get_editable_with_values()))
+    except Exception as e:
+        return cors(jsonify({"error": str(e)})), 500
+
+
+@app.route("/api/settings", methods=["POST"])
+def api_settings_post():
+    """Save one or more settings and reload config immediately."""
+    try:
+        body = request.get_json(silent=True) or {}
+        if not body:
+            return cors(jsonify({"error": "No settings provided"})), 400
+        config.save_all(body)
+        return cors(jsonify({"ok": True, "settings": config.get_editable_with_values()}))
+    except ValueError as e:
+        return cors(jsonify({"error": str(e)})), 400
+    except Exception as e:
+        return cors(jsonify({"error": str(e)})), 500
+
+
+@app.route("/settings")
+def settings_page():
+    fields_html = ""
+    for key, meta in config.EDITABLE.items():
+        badge_class = f"source-{meta.get('source', 'default')}" if 'source' in meta else "source-default"
+        input_type = "number" if meta["type"] in ("int", "float") else "text"
+        step_attr  = ' step="0.1"' if meta["type"] == "float" else (' step="1"' if meta["type"] == "int" else "")
+        fields_html += f"""
+        <div class="setting-row">
+          <div class="setting-label">{meta['label']}</div>
+          <div class="hint">{meta['hint']}</div>
+          <input type="{input_type}"{step_attr}
+                 id="field_{key}" name="{key}"
+                 data-key="{key}"
+                 placeholder="{meta['default']}">
+        </div>"""
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Settings — Tweet Tracker</title>
+  {BASE_STYLE}
+</head>
+<body>
+<div class="container">
+  <div class="nav-bar">
+    <h1>Settings</h1>
+    <div class="nav-links">
+      <a href="/">← Dashboard</a>
+    </div>
+  </div>
+  <p class="sub">Changes are saved to <code>settings.json</code> and take effect immediately.</p>
+
+  <div class="settings-grid" id="settings-grid">
+    {fields_html}
+  </div>
+
+  <div style="margin-top:1.5rem; display:flex; gap:0.75rem; flex-wrap:wrap;">
+    <button class="btn" onclick="saveAll()">Save Changes</button>
+    <button class="btn" style="background:#2a2a3a;color:#c9c9d4;" onclick="resetToDefaults()">Reset to Defaults</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  const EDITABLE_KEYS = {list(config.EDITABLE.keys())!r};
+
+  function showToast(msg, isError) {{
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className = 'toast show' + (isError ? ' error' : '');
+    setTimeout(() => t.className = 'toast', 2800);
+  }}
+
+  function applySettings(data) {{
+    for (const [key, meta] of Object.entries(data)) {{
+      const el = document.getElementById('field_' + key);
+      if (el) {{
+        el.value = meta.value;
+        const badge = el.closest('.setting-row').querySelector('.source-badge');
+        if (badge) {{
+          badge.className = 'source-badge source-' + meta.source;
+          badge.textContent = meta.source;
+        }}
+      }}
+    }}
+  }}
+
+  function addSourceBadges() {{
+    document.querySelectorAll('.setting-row').forEach(row => {{
+      const label = row.querySelector('.setting-label');
+      if (label && !label.querySelector('.source-badge')) {{
+        const badge = document.createElement('span');
+        badge.className = 'source-badge source-default';
+        badge.textContent = 'default';
+        label.appendChild(badge);
+      }}
+    }});
+  }}
+
+  async function loadSettings() {{
+    try {{
+      const res = await fetch('/api/settings');
+      const data = await res.json();
+      applySettings(data);
+    }} catch(e) {{
+      showToast('Failed to load settings', true);
+    }}
+  }}
+
+  async function saveAll() {{
+    const payload = {{}};
+    document.querySelectorAll('[data-key]').forEach(el => {{
+      payload[el.dataset.key] = el.value;
+    }});
+    try {{
+      const res = await fetch('/api/settings', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify(payload)
+      }});
+      const data = await res.json();
+      if (!res.ok) {{ showToast('Error: ' + data.error, true); return; }}
+      applySettings(data.settings);
+      showToast('Settings saved successfully');
+    }} catch(e) {{
+      showToast('Save failed: ' + e.message, true);
+    }}
+  }}
+
+  async function resetToDefaults() {{
+    if (!confirm('Reset all settings to defaults? This will clear settings.json.')) return;
+    try {{
+      // Save empty object — config will fall back to env vars / defaults
+      const res = await fetch('/api/settings', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{_reset: true}})
+      }});
+      await loadSettings();
+      showToast('Reset to defaults');
+    }} catch(e) {{
+      showToast('Reset failed', true);
+    }}
+  }}
+
+  addSourceBadges();
+  loadSettings();
+</script>
+</body>
+</html>"""
 
 
 def print_routes():

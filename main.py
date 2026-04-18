@@ -1,17 +1,15 @@
 import requests
 import xml.etree.ElementTree as ET
-import sqlite3
 from datetime import datetime, timezone
+
+from db import get_connection, DB_PATH, get_db_info
 
 NITTER_BASE = "http://mail.tidebridges.com:8091"
 USERNAMES = ["nasa", "SpaceX", "elonmusk"]
-DB_PATH = "tweets.db"
 
 
 def get_db_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return get_connection()
 
 
 def setup_database(conn):
@@ -167,7 +165,7 @@ def main():
     conn.close()
 
     print("\n" + "=" * 40)
-    print(f"All done! Database saved to {DB_PATH}")
+    print(f"All done! Backend: {get_db_info()}")
     print("=" * 40)
 
 

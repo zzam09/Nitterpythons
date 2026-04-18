@@ -1,10 +1,10 @@
 import os
 import re
-import sqlite3
 from datetime import datetime
-from flask import Flask, abort, jsonify, request
+from flask import Flask, jsonify, request
 
-DB_PATH = "tweets.db"
+from db import get_connection, DB_PATH, get_db_info
+
 app = Flask(__name__)
 
 BASE_STYLE = """
@@ -58,9 +58,7 @@ BASE_STYLE = """
 """
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return get_connection()
 
 
 def db_size_kb():
@@ -72,6 +70,34 @@ def db_size_kb():
 
 def run_migrations():
     conn = get_db()
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS tracked_users (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            username            TEXT UNIQUE NOT NULL,
+            display_name        TEXT,
+            is_active           INTEGER DEFAULT 1,
+            last_fetched        TEXT,
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+            fetch_interval_mins INTEGER DEFAULT 15,
+            added_at            TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS tweets (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            tweet_id     TEXT UNIQUE NOT NULL,
+            username     TEXT NOT NULL,
+            content      TEXT,
+            x_url        TEXT NOT NULL,
+            nitter_url   TEXT,
+            published_at TEXT,
+            is_retweet   INTEGER DEFAULT 0,
+            saved_at     TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+
     existing = {
         row[1]
         for row in conn.execute("PRAGMA table_info(tracked_users)").fetchall()

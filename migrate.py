@@ -1,17 +1,13 @@
-import sqlite3
-
-DB_PATH = "tweets.db"
+from db import get_connection, get_db_info
 
 
 def migrate():
-    conn = sqlite3.connect(DB_PATH)
+    print(f"Running migrations on: {get_db_info()}")
+    conn = get_connection()
+
     existing_users = {
         row[1]
         for row in conn.execute("PRAGMA table_info(tracked_users)").fetchall()
-    }
-    existing_tweets = {
-        row[1]
-        for row in conn.execute("PRAGMA table_info(tweets)").fetchall()
     }
 
     conn.execute("""

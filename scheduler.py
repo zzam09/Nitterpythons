@@ -1,9 +1,9 @@
 import schedule
-import sqlite3
 import time
 from datetime import datetime
 
-from main import DB_PATH, fetch_user
+from db import get_connection
+from main import fetch_user
 
 active_jobs = {}
 
@@ -14,8 +14,7 @@ def now_str():
 
 def get_active_users_from_db():
     try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
+        conn = get_connection()
         rows = conn.execute(
             "SELECT username, fetch_interval_mins FROM tracked_users WHERE is_active = 1"
         ).fetchall()

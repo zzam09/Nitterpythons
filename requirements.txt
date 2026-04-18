@@ -1,2 +1,4 @@
 requests
 flask
+libsql-experimental
+schedule

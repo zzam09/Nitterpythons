@@ -58,3 +58,8 @@ externalPort = 80
 
 [nix]
 channel = "stable-25_05"
+
+[userenv]
+
+[userenv.shared]
+TURSO_DATABASE_URL = "libsql://zam-dfghjkzq6.aws-eu-west-1.turso.io"

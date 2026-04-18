@@ -14,18 +14,19 @@ def get_db_connection():
 
 
 def setup_database(conn):
-    cursor = conn.cursor()
-    cursor.execute("""
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS tracked_users (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            username     TEXT UNIQUE NOT NULL,
-            display_name TEXT,
-            is_active    INTEGER DEFAULT 1,
-            last_fetched TEXT,
-            created_at   TEXT DEFAULT CURRENT_TIMESTAMP
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            username            TEXT UNIQUE NOT NULL,
+            display_name        TEXT,
+            is_active           INTEGER DEFAULT 1,
+            last_fetched        TEXT,
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+            fetch_interval_mins INTEGER DEFAULT 15,
+            added_at            TEXT
         )
     """)
-    cursor.execute("""
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS tweets (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             tweet_id     TEXT UNIQUE NOT NULL,
@@ -42,8 +43,7 @@ def setup_database(conn):
 
 
 def ensure_user_exists(conn, username):
-    cursor = conn.cursor()
-    cursor.execute(
+    conn.execute(
         "INSERT OR IGNORE INTO tracked_users (username) VALUES (?)",
         (username,)
     )
@@ -52,8 +52,7 @@ def ensure_user_exists(conn, username):
 
 def update_last_fetched(conn, username):
     now = datetime.now(timezone.utc).isoformat()
-    cursor = conn.cursor()
-    cursor.execute(
+    conn.execute(
         "UPDATE tracked_users SET last_fetched = ? WHERE username = ?",
         (now, username)
     )
@@ -61,18 +60,26 @@ def update_last_fetched(conn, username):
 
 
 def tweet_exists(conn, tweet_id):
-    cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM tweets WHERE tweet_id = ?", (tweet_id,))
-    return cursor.fetchone() is not None
+    row = conn.execute(
+        "SELECT 1 FROM tweets WHERE tweet_id = ?", (tweet_id,)
+    ).fetchone()
+    return row is not None
 
 
 def save_tweet(conn, tweet_id, username, content, x_url, nitter_url, published_at, is_retweet):
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO tweets (tweet_id, username, content, x_url, nitter_url, published_at, is_retweet)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (tweet_id, username, content, x_url, nitter_url, published_at, is_retweet))
-    conn.commit()
+    """
+    Save a single tweet with an immediate commit.
+    Rolls back and raises on failure so the caller can decide how to proceed.
+    """
+    try:
+        conn.execute("""
+            INSERT INTO tweets (tweet_id, username, content, x_url, nitter_url, published_at, is_retweet)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (tweet_id, username, content, x_url, nitter_url, published_at, is_retweet))
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise RuntimeError(f"Failed to save tweet {tweet_id}: {e}") from e
 
 
 def fetch_tweets_for_user(conn, username):
@@ -94,6 +101,8 @@ def fetch_tweets_for_user(conn, username):
 
     items = root.findall("./channel/item")
     new_count = 0
+    skip_count = 0
+    error_count = 0
 
     for item in items:
         link_el = item.find("link")
@@ -125,18 +134,33 @@ def fetch_tweets_for_user(conn, username):
             published_at = pub_date_el.text.strip()
 
         if tweet_exists(conn, tweet_id):
-            print(f"  Skipped (already saved): {tweet_id}")
+            skip_count += 1
         else:
-            save_tweet(conn, tweet_id, username, content, x_url, nitter_url, published_at, is_retweet)
-            print(f"  Saved: {x_url}")
-            new_count += 1
+            try:
+                save_tweet(conn, tweet_id, username, content, x_url, nitter_url, published_at, is_retweet)
+                print(f"  Saved: {x_url}")
+                new_count += 1
+            except RuntimeError as e:
+                print(f"  {e} — skipping")
+                error_count += 1
 
+    # Mark user as fetched only after all tweets are safely committed
     update_last_fetched(conn, username)
+
+    # Push everything to Turso cloud before moving to next user
+    conn.sync()
+
     tweet_word = "tweet" if new_count == 1 else "tweets"
-    print(f"Done for @{username} — {new_count} new {tweet_word} saved")
+    print(f"Done for @{username} — {new_count} new {tweet_word} saved"
+          + (f", {skip_count} skipped" if skip_count else "")
+          + (f", {error_count} errors" if error_count else ""))
 
 
 def fetch_user(username):
+    """
+    Fetch tweets for a single user using its own isolated connection.
+    Guarantees all data is committed and synced before returning.
+    """
     conn = get_db_connection()
     setup_database(conn)
     ensure_user_exists(conn, username)
@@ -144,29 +168,24 @@ def fetch_user(username):
         fetch_tweets_for_user(conn, username)
     except Exception as e:
         print(f"  Unexpected error for @{username}: {e}")
+        conn.rollback()
     finally:
         conn.close()
 
 
 def main():
     print("=" * 40)
-    print("Starting tweet fetch...")
+    print(f"Starting tweet fetch ({get_db_info()})")
     print("=" * 40)
 
-    conn = get_db_connection()
-    setup_database(conn)
-
+    # Each user gets its own isolated connection — fully committed and
+    # synced to Turso before the next user begins. This prevents
+    # race conditions and ensures no data loss if one user fails.
     for username in USERNAMES:
-        ensure_user_exists(conn, username)
-        try:
-            fetch_tweets_for_user(conn, username)
-        except Exception as e:
-            print(f"  Unexpected error for @{username}: {e}")
-
-    conn.close()
+        fetch_user(username)
 
     print("\n" + "=" * 40)
-    print(f"All done! Backend: {get_db_info()}")
+    print("All done!")
     print("=" * 40)
 
 

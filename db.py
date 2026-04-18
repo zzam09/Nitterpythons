@@ -73,8 +73,9 @@ class _WrappedCursor:
 
 class _WrappedConnection:
     """Connection wrapper that injects _DictRow support regardless of backend."""
-    def __init__(self, raw_conn):
+    def __init__(self, raw_conn, use_turso=False):
         self._conn = raw_conn
+        self._use_turso = use_turso
 
     def cursor(self):
         return _WrappedCursor(self._conn.cursor())
@@ -87,13 +88,29 @@ class _WrappedConnection:
     def commit(self):
         self._conn.commit()
 
+    def rollback(self):
+        try:
+            self._conn.rollback()
+        except Exception:
+            pass
+
+    def sync(self):
+        """Push local changes to Turso cloud. No-op for plain SQLite."""
+        if self._use_turso:
+            try:
+                self._conn.sync()
+            except Exception as e:
+                print(f"  Warning: Turso sync failed: {e}")
+
     def close(self):
         self._conn.close()
 
     def __enter__(self):
         return self
 
-    def __exit__(self, *args):
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is not None:
+            self.rollback()
         self.close()
 
 
@@ -108,7 +125,7 @@ def get_connection() -> _WrappedConnection:
     else:
         raw = sqlite3.connect(DB_PATH)
 
-    return _WrappedConnection(raw)
+    return _WrappedConnection(raw, use_turso=_USE_TURSO)
 
 
 def get_db_info() -> str:

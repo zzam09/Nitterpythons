@@ -5,8 +5,21 @@ from flask import Flask, jsonify, request
 
 import config
 from db import get_connection, DB_PATH, get_db_info
+from scheduler import init_app
+from logger import get_logger, setup_logging, RequestContext, FunctionContext, log_api_call
+
+# Setup structured logging
+setup_logging("INFO")
+logger = get_logger("dashboard")
 
 app = Flask(__name__)
+
+# Initialize APScheduler with Flask app
+init_app(app)
+
+# Start the scheduler immediately
+from scheduler import start_scheduler
+start_scheduler()
 
 BASE_STYLE = """
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -149,28 +162,35 @@ run_migrations()
 
 
 @app.route("/")
+@log_api_call("dashboard")
 def home():
-    conn = get_db()
+    with RequestContext(context="web_dashboard"):
+        with FunctionContext(logger, "load_homepage"):
+            conn = get_db()
 
-    total_tweets = conn.execute("SELECT COUNT(*) FROM tweets").fetchone()[0]
-    total_retweets = conn.execute("SELECT COUNT(*) FROM tweets WHERE is_retweet = 1").fetchone()[0]
-    users = conn.execute("SELECT * FROM tracked_users ORDER BY username").fetchall()
-    total_users = len(users)
+            total_tweets = conn.execute("SELECT COUNT(*) FROM tweets").fetchone()[0]
+            total_retweets = conn.execute("SELECT COUNT(*) FROM tweets WHERE is_retweet = 1").fetchone()[0]
+            users = conn.execute("SELECT * FROM tracked_users ORDER BY username").fetchall()
+            total_users = len(users)
 
-    cards_html = ""
-    for u in users:
-        username = u["username"]
-        tweet_count = conn.execute(
-            "SELECT COUNT(*) FROM tweets WHERE username = ?", (username,)
-        ).fetchone()[0]
-        rt_count = conn.execute(
-            "SELECT COUNT(*) FROM tweets WHERE username = ? AND is_retweet = 1", (username,)
-        ).fetchone()[0]
-        last_fetched = u["last_fetched"] or "Never"
-        if last_fetched != "Never":
-            last_fetched = last_fetched[:19].replace("T", " ")
+            logger.info("Loaded dashboard stats", total_users=total_users, total_tweets=total_tweets, total_retweets=total_retweets)
 
-        cards_html += f"""
+            cards_html = ""
+            for u in users:
+                username = u["username"]
+                tweet_count = conn.execute(
+                    "SELECT COUNT(*) FROM tweets WHERE username = ?", (username,)
+                ).fetchone()[0]
+                rt_count = conn.execute(
+                    "SELECT COUNT(*) FROM tweets WHERE username = ? AND is_retweet = 1", (username,)
+                ).fetchone()[0]
+                last_fetched = u["last_fetched"] or "Never"
+                if last_fetched != "Never":
+                    last_fetched = last_fetched[:19].replace("T", " ")
+
+                logger.debug("Processed user card", username=username, tweet_count=tweet_count, rt_count=rt_count)
+
+                cards_html += f"""
         <div class="card">
           <div class="username">@{username}</div>
           <div class="row"><span class="key">Total tweets</span><span class="val">{tweet_count}</span></div>
@@ -180,9 +200,9 @@ def home():
         </div>
         """
 
-    conn.close()
+            conn.close()
 
-    html = f"""<!DOCTYPE html>
+            html = f"""<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><title>Tweet Tracker Dashboard</title>{BASE_STYLE}</head>
 <body>
@@ -210,19 +230,23 @@ def home():
 </div>
 </body>
 </html>"""
-    return html
+            return html
 
 
 @app.route("/user/<username>")
+@log_api_call("dashboard")
 def user_tweets(username):
-    conn = get_db()
+    with RequestContext(user_id=username, context="web_user_tweets"):
+        with FunctionContext(logger, "load_user_tweets", username=username):
+            conn = get_db()
 
-    user = conn.execute(
-        "SELECT * FROM tracked_users WHERE username = ?", (username,)
-    ).fetchone()
+            user = conn.execute(
+                "SELECT * FROM tracked_users WHERE username = ?", (username,)
+            ).fetchone()
 
     if user is None:
         conn.close()
+        logger.warn("User not found", username=username)
         html = f"""<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><title>User Not Found</title>{BASE_STYLE}</head>
@@ -240,13 +264,22 @@ def user_tweets(username):
 
     tweets = conn.execute(
         """SELECT tweet_id, content, is_retweet, published_at, x_url
-           FROM tweets WHERE username = ?
-           ORDER BY published_at DESC""",
+           FROM tweets WHERE username = ?""",
         (username,)
     ).fetchall()
+    
+    # Sort in Python since Turso doesn't support datetime() function
+    def parse_date(date_str):
+        try:
+            return datetime.strptime(date_str, '%a, %d %b %Y %H:%M:%S %Z')
+        except:
+            return datetime.strptime(date_str.rsplit(' ', 1)[0], '%a, %d %b %Y %H:%M:%S')
+    
+    tweets = sorted([dict(r) for r in tweets], key=lambda x: parse_date(x['published_at']), reverse=True)
     conn.close()
 
     total = len(tweets)
+    logger.info("Loaded user tweets", username=username, total_tweets=total)
 
     if total == 0:
         body = f'<p class="empty">No tweets saved yet for @{username}</p>'
@@ -297,6 +330,32 @@ def user_tweets(username):
     return html
 
 
+def success_response(data=None, message="Success"):
+    """Create a standardized success response."""
+    response_data = {
+        "success": True,
+        "data": data or {},
+        "message": message
+    }
+    response = jsonify(response_data)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    return response
+
+
+def error_response(error_code, message, status_code=400):
+    """Create a standardized error response."""
+    response_data = {
+        "success": False,
+        "error": {
+            "code": error_code,
+            "message": message
+        }
+    }
+    response = jsonify(response_data)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    return response, status_code
+
+
 def cors(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
     return response
@@ -309,55 +368,84 @@ def fmt_ts(ts):
 
 
 @app.route("/api/users")
+@log_api_call("api")
 def api_users():
-    try:
-        conn = get_db()
-        users = conn.execute("SELECT * FROM tracked_users ORDER BY username").fetchall()
-        result = []
-        for u in users:
-            username = u["username"]
-            tweet_count = conn.execute(
-                "SELECT COUNT(*) FROM tweets WHERE username = ?", (username,)
-            ).fetchone()[0]
-            rt_count = conn.execute(
-                "SELECT COUNT(*) FROM tweets WHERE username = ? AND is_retweet = 1", (username,)
-            ).fetchone()[0]
-            result.append({
-                "username": username,
-                "display_name": u["display_name"],
-                "is_active": u["is_active"],
-                "last_fetched": fmt_ts(u["last_fetched"]),
-                "tweet_count": tweet_count,
-                "retweet_count": rt_count,
-                "fetch_interval_mins": u["fetch_interval_mins"],
-                "added_at": fmt_ts(u["added_at"]),
-            })
-        conn.close()
-        return cors(jsonify(result))
-    except Exception as e:
-        return cors(jsonify({"error": str(e)})), 500
+    """
+    Get all users in the database.
+    
+    Returns a list of all tracked users with their tweet counts and settings.
+    """
+    with RequestContext(context="api_users"):
+        with FunctionContext(logger, "get_users"):
+            try:
+                conn = get_db()
+                users = conn.execute("SELECT * FROM tracked_users ORDER BY username").fetchall()
+                result = []
+                for u in users:
+                    username = u["username"]
+                    tweet_count = conn.execute(
+                        "SELECT COUNT(*) FROM tweets WHERE username = ?", (username,)
+                    ).fetchone()[0]
+                    rt_count = conn.execute(
+                        "SELECT COUNT(*) FROM tweets WHERE username = ? AND is_retweet = 1", (username,)
+                    ).fetchone()[0]
+                    result.append({
+                        "username": username,
+                        "display_name": u["display_name"],
+                        "is_active": u["is_active"],
+                        "last_fetched": fmt_ts(u["last_fetched"]),
+                        "tweet_count": tweet_count,
+                        "retweet_count": rt_count,
+                        "fetch_interval_mins": u["fetch_interval_mins"],
+                        "added_at": fmt_ts(u["added_at"]),
+                    })
+                conn.close()
+                
+                logger.info("Retrieved users list", user_count=len(result))
+                return success_response(result, f"Retrieved {len(result)} users")
+            except Exception as e:
+                logger.error("Failed to retrieve users", error=str(e), error_type=type(e).__name__)
+                return error_response("INTERNAL_ERROR", "Failed to retrieve users", 500)
 
 
 @app.route("/api/tweets")
+@log_api_call("api")
 def api_tweets():
-    try:
-        conn = get_db()
-        username_filter = request.args.get("username")
-        if username_filter:
-            rows = conn.execute(
-                """SELECT * FROM tweets WHERE username = ?
-                   ORDER BY published_at DESC""",
-                (username_filter,)
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM tweets ORDER BY published_at DESC"
-            ).fetchall()
-        conn.close()
-        result = [dict(r) for r in rows]
-        return cors(jsonify(result))
-    except Exception as e:
-        return cors(jsonify({"error": str(e)})), 500
+    with RequestContext(context="api_tweets"):
+        with FunctionContext(logger, "get_tweets"):
+            try:
+                conn = get_db()
+                username_filter = request.args.get("username")
+                
+                # Parse date function for sorting
+                def parse_date(date_str):
+                    try:
+                        return datetime.strptime(date_str, '%a, %d %b %Y %H:%M:%S %Z')
+                    except:
+                        return datetime.strptime(date_str.rsplit(' ', 1)[0], '%a, %d %b %Y %H:%M:%S')
+                
+                if username_filter:
+                    rows = conn.execute(
+                        """SELECT * FROM tweets WHERE username = ?""",
+                        (username_filter,)
+                    ).fetchall()
+                    # Sort in Python since Turso doesn't support datetime() function
+                    rows = sorted([dict(r) for r in rows], key=lambda x: parse_date(x['published_at']), reverse=True)
+                    logger.info("Retrieved tweets for user", username=username_filter, count=len(rows))
+                else:
+                    rows = conn.execute(
+                        "SELECT * FROM tweets"
+                    ).fetchall()
+                    # Sort in Python since Turso doesn't support datetime() function
+                    rows = sorted([dict(r) for r in rows], key=lambda x: parse_date(x['published_at']), reverse=True)
+                    logger.info("Retrieved all tweets", count=len(rows))
+                    
+                conn.close()
+                result = [dict(r) for r in rows]
+                return cors(jsonify(result))
+            except Exception as e:
+                logger.error("Failed to retrieve tweets", error=str(e), error_type=type(e).__name__)
+                return cors(jsonify({"error": str(e)})), 500
 
 
 @app.route("/api/tweets/<username>")
@@ -371,10 +459,17 @@ def api_tweets_by_user(username):
             conn.close()
             return cors(jsonify({"error": "User not found"})), 404
         rows = conn.execute(
-            """SELECT * FROM tweets WHERE username = ?
-               ORDER BY published_at DESC""",
+            """SELECT * FROM tweets WHERE username = ?""",
             (username,)
         ).fetchall()
+        # Sort in Python since Turso doesn't support datetime() function
+        def parse_date(date_str):
+            try:
+                return datetime.strptime(date_str, '%a, %d %b %Y %H:%M:%S %Z')
+            except:
+                return datetime.strptime(date_str.rsplit(' ', 1)[0], '%a, %d %b %Y %H:%M:%S')
+        
+        rows = sorted([dict(r) for r in rows], key=lambda x: parse_date(x['published_at']), reverse=True)
         conn.close()
         result = [dict(r) for r in rows]
         return cors(jsonify(result))
@@ -404,42 +499,313 @@ def api_stats():
 
 
 @app.route("/api/users", methods=["POST"])
+@log_api_call("api")
 def api_add_user():
-    try:
-        body = request.get_json(silent=True) or {}
-        username = (body.get("username") or "").strip().lstrip("@")
-        if not username:
-            return cors(jsonify({"error": "username is required"})), 400
+    """
+    Create a new user in the database.
+    
+    Request Body:
+    {
+        "username": "required string",
+        "display_name": "optional string",
+        "fetch_interval_mins": "optional number >= 1, defaults to 15"
+    }
+    """
+    with RequestContext(context="api_add_user"):
+        with FunctionContext(logger, "add_user"):
+            try:
+                body = request.get_json(silent=True) or {}
+                username = (body.get("username") or "").strip().lstrip("@")
+                
+                # Validate required fields
+                if not username:
+                    return error_response("INVALID_INPUT", "username is required")
+                
+                # Validate fetch_interval_mins
+                interval = body.get("fetch_interval_mins", 15)
+                try:
+                    interval = int(interval)
+                    if interval < 1:
+                        return error_response("INVALID_INPUT", "fetch_interval_mins must be >= 1")
+                except (ValueError, TypeError):
+                    return error_response("INVALID_INPUT", "fetch_interval_mins must be a number")
+                
+                display_name = (body.get("display_name") or "").strip() or None
+                now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
-        display_name = (body.get("display_name") or "").strip() or None
-        interval = int(body.get("fetch_interval_mins") or 15)
-        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                conn = get_db()
+                
+                # Check if user already exists
+                existing = conn.execute(
+                    "SELECT 1 FROM tracked_users WHERE username = ?", (username,)
+                ).fetchone()
+                
+                if existing:
+                    conn.close()
+                    return error_response("DUPLICATE_USER", f"User @{username} already exists")
 
-        conn = get_db()
-        existing = conn.execute(
-            "SELECT 1 FROM tracked_users WHERE username = ?", (username,)
-        ).fetchone()
-        if existing:
-            conn.close()
-            return cors(jsonify({"error": "User already exists"})), 409
+                # Insert new user
+                conn.execute("""
+                    INSERT INTO tracked_users 
+                    (username, display_name, is_active, fetch_interval_mins, created_at, added_at)
+                    VALUES (?, ?, 1, ?, ?, ?)
+                """, (username, display_name, interval, now, now))
+                
+                conn.commit()
+                
+                # Get the created user data
+                user_data = conn.execute(
+                    "SELECT * FROM tracked_users WHERE username = ?", (username,)
+                ).fetchone()
+                
+                # Get tweet counts for the user
+                tweet_count = conn.execute(
+                    "SELECT COUNT(*) FROM tweets WHERE username = ?", (username,)
+                ).fetchone()[0]
+                rt_count = conn.execute(
+                    "SELECT COUNT(*) FROM tweets WHERE username = ? AND is_retweet = 1", (username,)
+                ).fetchone()[0]
+                
+                result = {
+                    "username": user_data["username"],
+                    "display_name": user_data["display_name"],
+                    "is_active": user_data["is_active"],
+                    "fetch_interval_mins": user_data["fetch_interval_mins"],
+                    "last_fetched": fmt_ts(user_data["last_fetched"]),
+                    "created_at": fmt_ts(user_data["created_at"]),
+                    "added_at": fmt_ts(user_data["added_at"]),
+                    "tweet_count": tweet_count,
+                    "retweet_count": rt_count
+                }
+                
+                conn.close()
+                logger.info("User added successfully", username=username)
+                return success_response(result, f"User @{username} added successfully")
+                
+            except Exception as e:
+                logger.error("Failed to add user", username=username, error=str(e), error_type=type(e).__name__)
+                return error_response("INTERNAL_ERROR", "Failed to add user", 500)
 
-        conn.execute(
-            """INSERT INTO tracked_users (username, display_name, fetch_interval_mins, added_at, is_active)
-               VALUES (?, ?, ?, ?, 1)""",
-            (username, display_name, interval, now),
-        )
-        conn.commit()
-        conn.close()
 
-        return cors(jsonify({
-            "username": username,
-            "display_name": display_name,
-            "is_active": 1,
-            "fetch_interval_mins": interval,
-            "added_at": now,
-        })), 201
-    except Exception as e:
-        return cors(jsonify({"error": str(e)})), 500
+@app.route("/api/users/<username>", methods=["PUT", "PATCH"])
+@log_api_call("api")
+def api_update_user(username):
+    """
+    Update an existing user's information.
+    
+    Request Body:
+    {
+        "display_name": "optional string",
+        "fetch_interval_mins": "optional number >= 1",
+        "is_active": "optional boolean"
+    }
+    """
+    with RequestContext(user_id=username, context="api_update_user"):
+        with FunctionContext(logger, "update_user", username=username):
+            try:
+                body = request.get_json(silent=True) or {}
+                
+                if not body:
+                    return error_response("INVALID_INPUT", "No update data provided")
+                
+                conn = get_db()
+                
+                # Check if user exists
+                existing = conn.execute(
+                    "SELECT * FROM tracked_users WHERE username = ?", (username,)
+                ).fetchone()
+                
+                if not existing:
+                    conn.close()
+                    return error_response("USER_NOT_FOUND", f"User @{username} not found", 404)
+                
+                # Validate and prepare update fields
+                update_fields = []
+                update_values = []
+                
+                # Validate fetch_interval_mins if provided
+                if "fetch_interval_mins" in body:
+                    interval = body["fetch_interval_mins"]
+                    try:
+                        interval = int(interval)
+                        if interval < 1:
+                            conn.close()
+                            return error_response("INVALID_INPUT", "fetch_interval_mins must be >= 1")
+                        update_fields.append("fetch_interval_mins = ?")
+                        update_values.append(interval)
+                    except (ValueError, TypeError):
+                        conn.close()
+                        return error_response("INVALID_INPUT", "fetch_interval_mins must be a number")
+                
+                # Validate display_name if provided
+                if "display_name" in body:
+                    display_name = (body["display_name"] or "").strip() or None
+                    update_fields.append("display_name = ?")
+                    update_values.append(display_name)
+                
+                # Validate is_active if provided
+                if "is_active" in body:
+                    is_active = body["is_active"]
+                    if isinstance(is_active, str):
+                        is_active = is_active.lower() in ("true", "1", "yes")
+                    update_fields.append("is_active = ?")
+                    update_values.append(1 if is_active else 0)
+                
+                if not update_fields:
+                    conn.close()
+                    return error_response("INVALID_INPUT", "No valid fields to update")
+                
+                # Execute update
+                update_values.append(username)  # For WHERE clause
+                update_query = f"UPDATE tracked_users SET {', '.join(update_fields)} WHERE username = ?"
+                conn.execute(update_query, update_values)
+                conn.commit()
+                
+                # Get updated user data
+                updated_user = conn.execute(
+                    "SELECT * FROM tracked_users WHERE username = ?", (username,)
+                ).fetchone()
+                
+                # Get tweet counts
+                tweet_count = conn.execute(
+                    "SELECT COUNT(*) FROM tweets WHERE username = ?", (username,)
+                ).fetchone()[0]
+                rt_count = conn.execute(
+                    "SELECT COUNT(*) FROM tweets WHERE username = ? AND is_retweet = 1", (username,)
+                ).fetchone()[0]
+                
+                result = {
+                    "username": updated_user["username"],
+                    "display_name": updated_user["display_name"],
+                    "is_active": updated_user["is_active"],
+                    "fetch_interval_mins": updated_user["fetch_interval_mins"],
+                    "last_fetched": fmt_ts(updated_user["last_fetched"]),
+                    "created_at": fmt_ts(updated_user["created_at"]),
+                    "added_at": fmt_ts(updated_user["added_at"]),
+                    "tweet_count": tweet_count,
+                    "retweet_count": rt_count
+                }
+                
+                conn.close()
+                logger.info("User updated successfully", username=username)
+                return success_response(result, f"User @{username} updated successfully")
+                
+            except Exception as e:
+                logger.error("Failed to update user", username=username, error=str(e), error_type=type(e).__name__)
+                return error_response("INTERNAL_ERROR", "Failed to update user", 500)
+
+
+@app.route("/api/users/<username>", methods=["DELETE"])
+@log_api_call("api")
+def api_delete_user(username):
+    """
+    Delete a user and optionally their tweets from the database.
+    
+    Query Parameters:
+    - delete_tweets: "true" to delete user's tweets, "false" (default) to keep them
+    """
+    with RequestContext(user_id=username, context="api_delete_user"):
+        with FunctionContext(logger, "delete_user", username=username):
+            try:
+                delete_tweets = request.args.get("delete_tweets", "false").lower() in ("true", "1", "yes")
+                
+                conn = get_db()
+                
+                # Check if user exists
+                existing = conn.execute(
+                    "SELECT * FROM tracked_users WHERE username = ?", (username,)
+                ).fetchone()
+                
+                if not existing:
+                    conn.close()
+                    return error_response("USER_NOT_FOUND", f"User @{username} not found", 404)
+                
+                # Get tweet counts before deletion for response
+                tweet_count = conn.execute(
+                    "SELECT COUNT(*) FROM tweets WHERE username = ?", (username,)
+                ).fetchone()[0]
+                rt_count = conn.execute(
+                    "SELECT COUNT(*) FROM tweets WHERE username = ? AND is_retweet = 1", (username,)
+                ).fetchone()[0]
+                
+                # Delete user's tweets if requested
+                if delete_tweets:
+                    conn.execute("DELETE FROM tweets WHERE username = ?", (username,))
+                else:
+                    # Keep tweets but remove username reference (optional)
+                    # This keeps the tweets but they won't be associated with the deleted user
+                    pass
+                
+                # Delete the user
+                conn.execute("DELETE FROM tracked_users WHERE username = ?", (username,))
+                conn.commit()
+                
+                result = {
+                    "username": username,
+                    "deleted_tweets": delete_tweets,
+                    "tweet_count_deleted": tweet_count if delete_tweets else 0,
+                    "retweet_count_deleted": rt_count if delete_tweets else 0
+                }
+                
+                conn.close()
+                logger.info("User deleted successfully", username=username, delete_tweets=delete_tweets, tweet_count=tweet_count)
+                return success_response(result, f"User @{username} deleted successfully")
+                
+            except Exception as e:
+                logger.error("Failed to delete user", username=username, error=str(e), error_type=type(e).__name__)
+                return error_response("INTERNAL_ERROR", "Failed to delete user", 500)
+
+
+@app.route("/api/users/<username>", methods=["GET"])
+@log_api_call("api")
+def api_get_user(username):
+    """
+    Get information for a specific user.
+    
+    Path Parameters:
+    - username: The username to retrieve
+    """
+    with RequestContext(user_id=username, context="api_get_user"):
+        with FunctionContext(logger, "get_user", username=username):
+            try:
+                conn = get_db()
+                
+                # Get user data
+                user = conn.execute(
+                    "SELECT * FROM tracked_users WHERE username = ?", (username,)
+                ).fetchone()
+                
+                if not user:
+                    conn.close()
+                    return error_response("USER_NOT_FOUND", f"User @{username} not found", 404)
+                
+                # Get tweet counts
+                tweet_count = conn.execute(
+                    "SELECT COUNT(*) FROM tweets WHERE username = ?", (username,)
+                ).fetchone()[0]
+                rt_count = conn.execute(
+                    "SELECT COUNT(*) FROM tweets WHERE username = ? AND is_retweet = 1", (username,)
+                ).fetchone()[0]
+                
+                result = {
+                    "username": user["username"],
+                    "display_name": user["display_name"],
+                    "is_active": user["is_active"],
+                    "fetch_interval_mins": user["fetch_interval_mins"],
+                    "last_fetched": fmt_ts(user["last_fetched"]),
+                    "created_at": fmt_ts(user["created_at"]),
+                    "added_at": fmt_ts(user["added_at"]),
+                    "tweet_count": tweet_count,
+                    "retweet_count": rt_count
+                }
+                
+                conn.close()
+                logger.info("User retrieved successfully", username=username)
+                return success_response(result, f"User @{username} retrieved successfully")
+                
+            except Exception as e:
+                logger.error("Failed to get user", username=username, error=str(e), error_type=type(e).__name__)
+                return error_response("INTERNAL_ERROR", "Failed to get user", 500)
 
 
 def render_markdown(md_text):

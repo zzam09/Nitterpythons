@@ -1,4 +1,5 @@
 requests
 flask
-schedule
 libsql-experimental
+apscheduler
+sqlalchemy

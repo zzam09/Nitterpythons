@@ -1,5 +1,5 @@
-import os
 import sqlite3
+import config
 
 try:
     import libsql_experimental as libsql
@@ -7,9 +7,9 @@ try:
 except ImportError:
     _LIBSQL_AVAILABLE = False
 
-DB_PATH = os.environ.get("DB_PATH", "tweets.db")
-TURSO_URL = os.environ.get("TURSO_DATABASE_URL", "")
-TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN", "")
+DB_PATH    = config.DB_PATH
+TURSO_URL  = config.TURSO_DATABASE_URL
+TURSO_TOKEN = config.TURSO_AUTH_TOKEN
 
 _USE_TURSO = _LIBSQL_AVAILABLE and bool(TURSO_URL) and bool(TURSO_TOKEN)
 

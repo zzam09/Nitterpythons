@@ -3,6 +3,7 @@ import re
 from datetime import datetime
 from flask import Flask, jsonify, request
 
+import config
 from db import get_connection, DB_PATH, get_db_info
 
 app = Flask(__name__)
@@ -579,9 +580,21 @@ def docs():
 </html>"""
 
 
+@app.route("/api/config")
+def api_config():
+    """Return non-sensitive config summary for diagnostics."""
+    try:
+        return cors(jsonify(config.summary()))
+    except Exception as e:
+        return cors(jsonify({"error": str(e)})), 500
+
+
 def print_routes():
     print("\n" + "=" * 48)
     print("  Tweet Tracker — dashboard.py running")
+    print(f"  DB      : {get_db_info()}")
+    print(f"  Nitter  : {config.NITTER_BASE}")
+    print(f"  Retries : {config.MAX_RETRIES}  Timeout: {config.REQUEST_TIMEOUT}s  Backoff: {config.RETRY_BACKOFF}x")
     print("=" * 48)
     routes = sorted(
         [
@@ -598,5 +611,6 @@ def print_routes():
 
 
 if __name__ == "__main__":
+    config.validate()
     print_routes()
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host=config.FLASK_HOST, port=config.FLASK_PORT, debug=False)
